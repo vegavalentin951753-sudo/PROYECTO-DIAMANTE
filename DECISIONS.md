@@ -34,3 +34,12 @@
 ## [2026-11-24] - Creación Exitosa del Esquema SQLite
 *   **Decisión:** Se implementó el script `db_setup.py` para crear las tablas `documentos`, `hechos` y `tareas`. 
 *   **Detalle técnico:** Se utilizó el comando `cat << 'EOF'` en Termux para evitar errores de indentación de Termius (el editor `nano` pegaba el código en una sola línea). Se habilitó el modo WAL y `synchronous=NORMAL` para balancear velocidad y durabilidad.
+
+## [2026-11-24] - Módulo 1 (Recolector) validado en el teléfono
+* Hecho: 10 noticias reales de La Razón guardadas; la segunda corrida dio 0 nuevas y 10 ya conocidas (idempotencia por URL verificada en el teléfono).
+* Problema: el feed respondió HTTP 403 con el User-Agent propio.
+* Decisión: usar el User-Agent de Chrome en Android para leer feeds. Riesgo: sortea un bloqueo del sitio. Mitigación: uso personal, máx. 10 descargas por tick, pausa de 2 s, sin redistribuir texto.
+* Pendiente: revisar robots.txt y términos de La Razón; trafilatura.fetch_url usa su propio User-Agent (unificar si hace falta).
+## [2026-11-24] - Esquema v2
+* documentos (una fila por URL) separado de versiones (una por texto distinto) + crudos (HTML comprimido); hechos cuelga de version_id.
+* Fechas en UTC ISO 8601 con Z; ON CONFLICT DO NOTHING en vez de INSERT OR IGNORE; tope de 10 descargas y 6 min por tick; candado de ejecución; tabla ejecuciones como latido.

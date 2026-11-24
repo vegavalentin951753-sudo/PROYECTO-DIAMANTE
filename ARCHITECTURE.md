@@ -7,21 +7,21 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 *   **Hardware:** Realme 8 Pro (Snapdragon 720G, 8GB RAM, sin root).
 *   **Entorno:** Termux (instalado oficialmente desde **F-Droid**, no GitHub, para asegurar firmas y actualizaciones). Uso de `termux-api` y `termux-job-scheduler`.
 *   **Lenguaje:** Python 3.14.10.
-*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`). Archivo: `diamante.db`.
-*   **Librerías Locales:** `trafilatura` (limpieza HTML), `rapidfuzz` (deduplicación), `regex`/diccionarios (NER, en lugar de spaCy).
-*   **Programación de Tareas:** `termux-job-scheduler`. **Nota crítica:** Android impone un mínimo de 15 minutos (900,000 ms) para tareas periódicas en segundo plano. No se pueden programar ticks de 1 minuto.
+*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`). Archivo: `diamante.db`. Esquema v2: `documentos`, `versiones`, `crudos`, `hechos`, `tareas`, `ejecuciones`.
+*   **Librerías Locales:** `trafilatura` (limpieza HTML). `rapidfuzz` (se usará en un módulo posterior para similitud). `regex`/diccionarios (NER, en lugar de spaCy).
+*   **Programación de Tareas:** `termux-job-scheduler`. **Nota crítica:** Android impone un mínimo de 15 minutos (900,000 ms) para tareas periódicas en segundo plano.
 *   **LLM Local:** Qwen 1.5B Q4 (GGUF) vía `llama.cpp` (Uso exclusivo: extracción estructurada a JSON).
 *   **LLM Nube:** Cliente HTTP propio (sin LiteLLM) hacia DeepSeek/Gemini con contabilidad de tokens.
 
 ## 3. El Pipeline (Flujo de Datos)
-1.  **Ingesta (Recolector):** Descarga RSS/HTML/PDFs. Extrae texto limpio con `trafilatura`. Guarda originales y hashes.
-2.  **Deduplicación:** `rapidfuzz` compara títulos y cuerpos para evitar procesar la misma noticia múltiples veces. Conserva el registro de procedencia (quién publicó primero).
+1.  **Ingesta (Recolector):** Descarga RSS/HTML. Extrae texto limpio con `trafilatura`. Guarda originales comprimidos (`crudos`), textos (`versiones`) y hashes.
+2.  **Deduplicación:** Identificación por `url_canonica` + hash del cuerpo del texto. Las copias de un mismo texto en diferentes URLs se guardan para mantener la procedencia. La similitud con `rapidfuzz`/SimHash va en un módulo posterior.
 3.  **Extracción Determinista:** Python puro (`regex`) extrae fechas, números de decretos e instituciones bolivianas (Aduana, BCB, INE) usando un diccionario propio (gazetteer).
 4.  **Extracción Semántica:** Qwen 1.5B recibe fragmentos cortos y devuelve JSON estricto con hechos (sujeto, verbo, objeto, cita literal).
-5.  **Validación (El Guardián):** Python verifica que la cita literal exista en el texto. Si el LLM alucinó una cifra o fecha, se descarta.
-6.  **Almacenamiento:** Todo va a SQLite. Máquina de estados para las tareas (`pendiente`, `running`, `completed`, `failed`).
+5.  **Validación (El Guardián):** Python verifica que la cita literal exista en el texto original. Si el LLM alucinó una cifra o fecha, se descarta.
+6.  **Almacenamiento:** Todo va a SQLite. Máquina de estados para las tareas (`pendiente`, `running`, `completed`, `failed`, `dead`).
 7.  **Generación de Informe:** Un script empaqueta los hechos JSON validados y los envía a la nube. El prompt exige que cada párrafo cite un ID de hecho (`[F123]`).
-8.  **Distribución:** El informe final (Markdown) se envía por Telegram como archivo `.md` (evitando el límite de 4096 caracteres).
+8.  **Distribución:** El informe final (Markdown) se envía por Telegram como archivo `.md`.
 
 ## 4. Reglas de Seguridad Críticas
 *   **Aislamiento del LLM:** Qwen no tiene acceso a internet, ni a la base de datos, ni a claves API. Solo recibe texto y devuelve JSON.

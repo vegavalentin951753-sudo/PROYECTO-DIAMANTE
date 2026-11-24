@@ -5,10 +5,11 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 
 ## 2. Stack Tecnológico (Fase 0 Validada)
 *   **Hardware:** Realme 8 Pro (Snapdragon 720G, 8GB RAM, sin root).
-*   **Entorno:** Termux (Android). Uso de `termux-job-scheduler` para disparar tareas y `termux-wake-lock` para evitar que Android duerma el proceso.
-*   **Lenguaje:** Python 3.14.
-*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`).
+*   **Entorno:** Termux (instalado oficialmente desde **F-Droid**, no GitHub, para asegurar firmas y actualizaciones). Uso de `termux-api` y `termux-job-scheduler`.
+*   **Lenguaje:** Python 3.14.10.
+*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`). Archivo: `diamante.db`.
 *   **Librerías Locales:** `trafilatura` (limpieza HTML), `rapidfuzz` (deduplicación), `regex`/diccionarios (NER, en lugar de spaCy).
+*   **Programación de Tareas:** `termux-job-scheduler`. **Nota crítica:** Android impone un mínimo de 15 minutos (900,000 ms) para tareas periódicas en segundo plano. No se pueden programar ticks de 1 minuto.
 *   **LLM Local:** Qwen 1.5B Q4 (GGUF) vía `llama.cpp` (Uso exclusivo: extracción estructurada a JSON).
 *   **LLM Nube:** Cliente HTTP propio (sin LiteLLM) hacia DeepSeek/Gemini con contabilidad de tokens.
 

@@ -43,3 +43,15 @@
 ## [2026-11-24] - Esquema v2
 * documentos (una fila por URL) separado de versiones (una por texto distinto) + crudos (HTML comprimido); hechos cuelga de version_id.
 * Fechas en UTC ISO 8601 con Z; ON CONFLICT DO NOTHING en vez de INSERT OR IGNORE; tope de 10 descargas y 6 min por tick; candado de ejecución; tabla ejecuciones como latido.
+
+## [2026-11-24] - Auditoría externa: fuentes y alcance legal
+* Los Tiempos se excluye: sus términos prohíben almacenar y reproducir sin autorización escrita.
+* Opinión (https://www.opinion.com.bo/rss/) se añade DESHABILITADA hasta verificar robots.txt y términos desde Termux; comprobar también si /rss/ es un feed o un índice.
+* INE prohíbe scraping no autorizado: fuera hasta tener permiso o vía oficial. Términos de La Razón aún sin revisar.
+## [2026-11-24] - Recolector v2 (esquema v3)
+* Versionado: cada documento se revisa cada 12 h durante 3 días desde su primera captura (supuestos); hash distinto = versión nueva; una revisión fallida no degrada un 'ok'.
+* robots.txt falla cerrado: error de red, 5xx o 429 = no se descarga; 401/403 = prohibido; 404/410 = permitido. Aplica al feed, a los artículos y a cada redirección.
+* Todo fallo cuenta intento (excepciones incluidas): espera 30 min x2, abandono al 8.º. sin_texto: 6 h x2, abandono al 4.º. bloqueado_robots se reevalúa cada 24 h. Nada es terminal de golpe.
+* URLs: solo http/https, sin credenciales ni IP literal, puertos 80/443, dominio de la lista de la fuente; máx. 3 redirecciones, cada una revalidada. Tope de 4 MB (HTML), 3 MB (feed) y 60 s por descarga (supuestos).
+* Tope GLOBAL de 10 descargas por tick, repartido por turnos entre fuentes. Se reemplaza trafilatura.fetch_url por descarga propia (un solo User-Agent).
+* Esquema v3: documentos gana ultima_revision, proxima_revision, ultimo_error. Riesgo vigente: el UA de Chrome sortea un bloqueo del sitio.

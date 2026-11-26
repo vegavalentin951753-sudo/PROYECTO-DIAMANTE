@@ -34,7 +34,6 @@
 ## [2026-11-24] - Creación Exitosa del Esquema SQLite
 *   **Decisión:** Se implementó el script `db_setup.py` para crear las tablas `documentos`, `hechos` y `tareas`. 
 *   **Detalle técnico:** Se utilizó el comando `cat << 'EOF'` en Termux para evitar errores de indentación de Termius (el editor `nano` pegaba el código en una sola línea). Se habilitó el modo WAL y `synchronous=NORMAL` para balancear velocidad y durabilidad.
-
 ## [2026-11-24] - Módulo 1 (Recolector) validado en el teléfono
 * Hecho: 10 noticias reales de La Razón guardadas; la segunda corrida dio 0 nuevas y 10 ya conocidas (idempotencia por URL verificada en el teléfono).
 * Problema: el feed respondió HTTP 403 con el User-Agent propio.
@@ -43,15 +42,61 @@
 ## [2026-11-24] - Esquema v2
 * documentos (una fila por URL) separado de versiones (una por texto distinto) + crudos (HTML comprimido); hechos cuelga de version_id.
 * Fechas en UTC ISO 8601 con Z; ON CONFLICT DO NOTHING en vez de INSERT OR IGNORE; tope de 10 descargas y 6 min por tick; candado de ejecución; tabla ejecuciones como latido.
+## [2026-11-25] - Validación de Ingesta y Limitaciones de Plataforma
+* Se confirma el funcionamiento del Recolector v2 en hardware real (Realme 8 Pro/Termux).
+* Se adopta la política de "Fail Closed" para robots.txt, verificada en pruebas unitarias y reales.
+* Se acepta la limitación de suspensión de procesos de Android (Doze) como riesgo conocido para la MVP. Los ticks nocturnos pueden demorarse significativamente (>1h). No se implementan soluciones complejas de Wakelock hasta validar la utilidad real de los datos nocturnos.
+* La fuente "Opinión" permanece deshabilitada técnicamente pese a cumplir requisitos de robots.txt, aguardando aprobación legal explícita.
+* Se autoriza el inicio de la Fase 0 (Integración LLM Local) dado que la capa de datos estructurada es estable.
+## [2026-11-25] - Convención de fechas y husos horarios
 
-## [2026-11-24] - Auditoría externa: fuentes y alcance legal
-* Los Tiempos se excluye: sus términos prohíben almacenar y reproducir sin autorización escrita.
-* Opinión (https://www.opinion.com.bo/rss/) se añade DESHABILITADA hasta verificar robots.txt y términos desde Termux; comprobar también si /rss/ es un feed o un índice.
-* INE prohíbe scraping no autorizado: fuera hasta tener permiso o vía oficial. Términos de La Razón aún sin revisar.
-## [2026-11-24] - Recolector v2 (esquema v3)
-* Versionado: cada documento se revisa cada 12 h durante 3 días desde su primera captura (supuestos); hash distinto = versión nueva; una revisión fallida no degrada un 'ok'.
-* robots.txt falla cerrado: error de red, 5xx o 429 = no se descarga; 401/403 = prohibido; 404/410 = permitido. Aplica al feed, a los artículos y a cada redirección.
-* Todo fallo cuenta intento (excepciones incluidas): espera 30 min x2, abandono al 8.º. sin_texto: 6 h x2, abandono al 4.º. bloqueado_robots se reevalúa cada 24 h. Nada es terminal de golpe.
-* URLs: solo http/https, sin credenciales ni IP literal, puertos 80/443, dominio de la lista de la fuente; máx. 3 redirecciones, cada una revalidada. Tope de 4 MB (HTML), 3 MB (feed) y 60 s por descarga (supuestos).
-* Tope GLOBAL de 10 descargas por tick, repartido por turnos entre fuentes. Se reemplaza trafilatura.fetch_url por descarga propia (un solo User-Agent).
-* Esquema v3: documentos gana ultima_revision, proxima_revision, ultimo_error. Riesgo vigente: el UA de Chrome sortea un bloqueo del sitio.
+* La base de datos y los logs técnicos usan UTC ISO 8601 con sufijo Z.
+* La documentación humana del proyecto usa fecha local de Bolivia, salvo indicación contraria.
+* Cuando exista discrepancia entre fecha local y UTC, se registrará ambas si es relevante.
+* Motivo: evitar confusiones en ADRs, benchmarks y auditorías entre IAs con distintos relojes base.
+
+## [2026-11-25] - Fase 0 LLM validada en hardware real
+
+* Se confirma `llama.cpp` compilado en Termux ARM64.
+* Se usa `llama-completion` como binario principal.
+* Se valida Qwen2.5-1.5B-Instruct Q4_K_M GGUF, archivo `qwen2.5-1.5b-instruct-q4_k_m.gguf`, ~1117 MB.
+* RAM pico observada: ~2048 MB.
+* Temperatura observada: ~30.3–30.9 °C, sin throttling térmico evidente.
+* Opciones soportadas detectadas: `--json-schema`, `--perf`, `-no-cnv`, `--no-display-prompt`, `--no-escape`.
+* Benchmark `llama-bench` muestra que para generación de tokens, 2 hilos supera a 4 y 6 hilos en este dispositivo.
+* Decisión: el extractor usará `-t 2` por defecto para generación, priorizando tg32 sobre pp128.
+
+## [2026-11-25] - Extractor JSON en borrador, no aceptado
+
+* Sonnet entregó un borrador de `extractor_json.py`.
+* El diseño es coherente con la arquitectura Data-Centric:
+  - LLM aislado vía `llm_runner`;
+  - sin acceso a SQLite desde el proceso del modelo;
+  - validación dura de `cita_literal`;
+  - rechazo de cifras fuera de la cita;
+  - manejo de JSON inválido/incompleto;
+  - tareas con lease y reintentos.
+* Sin embargo, no se acepta como estable todavía porque:
+  - se detectó error de indentación en `main()`;
+  - no se entregaron pruebas ejecutadas;
+  - no se entregaron mutaciones;
+  - no se validó contra el teléfono más allá del benchmark base.
+* Regla operativa: no usar `--guardar` hasta pasar pruebas offline y demo controlada.
+
+## [2026-11-25] - BCB: serie confirmada limitada a tipo de cambio
+
+* Se inspeccionó una muestra JSON del BCB correspondiente al Gráfico Evolutivo.
+* La serie observada es tipo de cambio en bolivianos por dólar estadounidense.
+* Estructura mínima observada:
+  - `variable`
+  - `unidad`
+  - `datos[]`
+  - campos `Fecha` y `Valor`
+* Decisión: BCB sigue siendo fuente institucional prioritaria, pero su adaptador se pospone.
+* Razón: primero debe validarse el extractor semántico local; después se integrarán series estructuradas sin LLM.
+## [2026-11-26] - Extractor validado en teléfono (Dry-Run)
+*   **Hecho:** El `extractor_json.py` de Sonnet corrió con Qwen 1.5B real en el Realme 8 Pro. Se procesó un texto de la BD y se extrajeron 4 hechos válidos.
+*   **Decisión sobre `unittest` vs `pytest`:** Se adopta `unittest` (librería estándar) para las pruebas del extractor. Evita depender de la red para instalar dependencias en Termux. `pytest` puede correrlos si se desea, pero no es obligatorio.
+*   **Decisión sobre el esquema JSON:** `llm_runner.py` hace el `json.dumps` internamente. Por lo tanto, el extractor debe pasarle el diccionario (`SCHEMA_COMO_TEXTO = False`).
+*   **Aislamiento Confirmado:** El script usa un import perezoso de `llm_runner`. Si no se va a usar el modelo, se puede importar el archivo sin que colapse.
+*   **Pendiente de mejora:** Fragmentación por oraciones y prompt de sistema más estricto para evitar sujetos genéricos.

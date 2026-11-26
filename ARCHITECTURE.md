@@ -17,8 +17,8 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 1.  **Ingesta (Recolector):** Descarga RSS/HTML. Extrae texto limpio con `trafilatura`. Guarda originales comprimidos (`crudos`), textos (`versiones`) y hashes.
 2.  **Deduplicación:** Identificación por `url_canonica` + hash del cuerpo del texto. Las copias de un mismo texto en diferentes URLs se guardan para mantener la procedencia. La similitud con `rapidfuzz`/SimHash va en un módulo posterior.
 3.  **Extracción Determinista:** Python puro (`regex`) extrae fechas, números de decretos e instituciones bolivianas (Aduana, BCB, INE) usando un diccionario propio (gazetteer).
-4.  **Extracción Semántica:** Qwen 1.5B recibe fragmentos cortos y devuelve JSON estricto con hechos (sujeto, verbo, objeto, cita literal).
-5.  **Validación (El Guardián):** Python verifica que la cita literal exista en el texto original. Si el LLM alucinó una cifra o fecha, se descarta.
+4. **Extracción Semántica:** Qwen 1.5B recibe fragmentos cortos (cortados por oraciones, no por caracteres) y devuelve JSON estricto con hechos (`sujeto`, `accion`, `objeto`, `cita_literal`).
+5. **Validación (El Guardián):** Python verifica que la cita literal exista en el texto original y que las cifras coincidan. Los hechos rechazados se guardan con `estado='rechazado'` y su motivo.
 6.  **Almacenamiento:** Todo va a SQLite. Máquina de estados para las tareas (`pendiente`, `running`, `completed`, `failed`, `dead`).
 7.  **Generación de Informe:** Un script empaqueta los hechos JSON validados y los envía a la nube. El prompt exige que cada párrafo cite un ID de hecho (`[F123]`).
 8.  **Distribución:** El informe final (Markdown) se envía por Telegram como archivo `.md`.

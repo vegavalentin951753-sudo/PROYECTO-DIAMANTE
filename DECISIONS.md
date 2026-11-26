@@ -100,3 +100,24 @@
 *   **Decisión sobre el esquema JSON:** `llm_runner.py` hace el `json.dumps` internamente. Por lo tanto, el extractor debe pasarle el diccionario (`SCHEMA_COMO_TEXTO = False`).
 *   **Aislamiento Confirmado:** El script usa un import perezoso de `llm_runner`. Si no se va a usar el modelo, se puede importar el archivo sin que colapse.
 *   **Pendiente de mejora:** Fragmentación por oraciones y prompt de sistema más estricto para evitar sujetos genéricos.
+## [2026-11-26] - Modulo 2.1: Afinacion del Extractor (Cerrado)
+*   **Problema 1:** `fragmentar()` cortaba oraciones a mitad de palabra (ej. terminaba en "los puestos de vent").
+*   **Problema 2:** El prompt generico hacia que Qwen extrayera sujetos ambiguos ("la institucion", "el gobierno") y atribuyera mal las citas.
+*   **Solucion fragmentacion:** `_corte_seguro` corta por `; `, `, ` y espacio; nunca a mitad de palabra. `_cortar_largo` itera hasta que el resto cabe. Corte forzado solo si no hay ningun espacio (palabra > `max_chars`).
+*   **Solucion prompt:** Se agregaron 3 reglas de sujeto al `SYSTEM_PROMPT`: (1) sujeto debe ser nombre propio, cargo con nombre o institucion nombrada explicitamente en la cita; (2) prohibido pronombres, anaforicos y genericos; (3) prohibido inferir atribuciones ("segun X, Y hizo Z" -> sujeto es Y, salvo accion "declarar"/"afirmar").
+*   **Solucion Guardian:** Dos chequeos nuevos al final de `validar_hecho`: `sujeto_generico` (lista negra `SUJETOS_GENERICOS`, comparada sin tildes via `_clave_sujeto`) y `sujeto_no_en_cita` (al menos una palabra significativa del sujeto debe aparecer como substring en la cita normalizada sin tildes).
+*   **Ampliacion de lista negra (no solicitada, aprobada):** "la empresa", "el ministerio", "la autoridad", "las autoridades", "el organismo", "esta entidad", "dicha institucion". Motivo: cubren variantes que Qwen produce cuando el sujeto real esta en un parrafo anterior.
+*   **Comportamiento conocido, documentado en test:** "Banco" matchea dentro de "bancos" por substring. Si se endurece la regla (exigir >= 2 palabras o la mitad), actualizar `test_guardian_acepta_sujeto_corto_con_match_parcial`.
+*   **MAX_HECHOS_POR_FRAGMENTO:** se mantiene en 5. TODO abierto: evaluar subir a 6-8 si el prompt endurecido no degrada calidad (pruebas actuales sin problemas de rendimiento).
+*   **Tests:** `test_extractor_21.py` con 7 tests nuevos. Total: 69/69 OK en Termux (Python 3.14.10).
+*   **Commit:** `a1c4163` en `main`.
+## [2026-11-26] - Correccion de test preexistente (SCHEMA_COMO_TEXTO)
+*   **Contexto:** `SCHEMA_COMO_TEXTO` paso de `True` a `False` en una sesion anterior (validado en hardware real: `llm_runner.py` ya hace `json.dumps` internamente; con `True` se producia doble serializacion y Qwen no interpretaba el esquema).
+*   **Problema:** El test `test_llamada_al_runner_usa_parametros_acordados` asumia `str` y hacia `json.loads(kw["json_schema"])`, fallando con `TypeError` al recibir un dict. El error era preexistente; el Modulo 2.1 solo lo hizo evidente al correr la suite completa.
+*   **Decision:** Corregir el test, no el codigo. Se normaliza a dict si vino como `str` y se compara contra `ESQUEMA_HECHOS`. Cubre ambos modos (`True` y `False`).
+*   **Archivo tocado:** `test_extractor_json.py` (linea unica). `extractor_json.py` no cambio por esto.
+*   **Resultado:** 69/69 tests en verde.
+## [2026-11-26] - Pendientes post-2.1 y adaptador BCB
+*   **Demo `--dry-run`:** pendiente correr el extractor nuevo contra texto real de la BD para medir si el prompt endurecido mejora la calidad de los hechos aceptados o solo aumenta los rechazos. Criterio: aceptados bajan o se mantienen, rechazados suben.
+*   **`bcb_adapter.py`:** contrato de entrada y salida aprobado (analisis de ChatGPT). Pendiente definir 5 puntos antes de programar: (1) tabla destino (`series_temporales` nueva o extension de `hechos`); (2) idempotencia (`DO NOTHING` por `(serie_id, fecha)`); (3) hash del archivo (SHA-256 del archivo entero, no del array `datos`); (4) reloj (`db.ahora_utc()` inyectado como dependencia o llamado interno); (5) ubicacion del modulo (`adapters/bcb_adapter.py` si habra mas fuentes, sino raiz).
+*   **Primera corrida con `--guardar`:** pendiente validar insercion en tabla `hechos` (actualmente en 0 filas). No hacer hasta cerrar la demo.

@@ -1,4 +1,4 @@
-# ESTADO (2026-11-25, hora local Bolivia; registros técnicos en UTC)
+# ESTADO (2026-11-26, hora local Bolivia; registros técnicos en UTC)
 
 ## Probado en el teléfono
 - Termux oficial desde F-Droid, Python 3.14.10, Realme 8 Pro.
@@ -33,34 +33,35 @@
   - 6 hilos: pp128 ~36.14 t/s, tg32 ~10.18 t/s.
 - Decisión técnica: para generación usar `-t 2`, porque mejora tg32 en este Snapdragon 720G.
 
-## Extractor Semántico (Fase 0 - Validado en hardware real)
-- **Estado:** FUNCIONAL Y VALIDADO (versión 1.0).
-- `extractor_json.py` escrito y probado en Termux (Python 3.14.10).
-- 62/62 tests pasan en el teléfono usando `unittest` (sin necesidad de instalar `pytest`).
+## Extractor Semántico (Módulo 2.1 - Cerrado el 2026-11-26)
+- **Estado:** MÓDULO 2.1 CERRADO Y VALIDADO (commit `a1c4163` en `main`).
+- `extractor_json.py` y `test_extractor_21.py` probados en Termux (Python 3.14.10).
+- **69/69 tests pasan en el teléfono** usando `unittest` (62 anteriores + 7 nuevos del Módulo 2.1).
 - **Aislamiento verificado:** no importa `sqlite3` ni librerías de red.
-- **Prueba con Qwen real:** exitosa. El modelo extrajo hechos y el Guardián validó las citas literales y las cifras.
-- **Decisión de diseño:** `SCHEMA_COMO_TEXTO = False` para evitar el doble `json.dumps` (llm_runner ya lo hace).
+- **Afinación 2.1 aplicada:**
+  - Fragmentación sin cortar palabras (`_corte_seguro` + `_cortar_largo`).
+  - Prompt endurecido con 3 reglas explícitas de sujeto.
+  - Guardián ampliado con `sujeto_generico` y `sujeto_no_en_cita`.
+- **Decisión de diseño:** `SCHEMA_COMO_TEXTO = False` (validado en hardware real; `llm_runner` serializa internamente).
 - **Modo seguro:** El script asume `--dry-run` por defecto. El flag `--guardar` está implementado pero no se ha ejecutado contra la BD real.
-- **Limitaciones detectadas:** El LLM a veces extrae sujetos genéricos ("la institución") y el fragmentador corta a mitad de palabra. Requiere ajuste (Módulo 2.1).
 
 ## Fuentes estructuradas / BCB
 - Se confirmó que una serie pública del BCB corresponde a tipo de cambio USD/BOB.
 - Formato observado: JSON con campos `variable`, `unidad`, `datos[]`, y dentro `Fecha`, `Valor`.
-- Útil, pero demasiado angosto para ser la única fuente institucional.
-- Decisión provisional: posponer `bcb_adapter.py` hasta cerrar extractor JSON.
+- Contrato de `bcb_adapter.py` aprobado; pendiente definir 5 puntos de diseño antes de programar.
+- Útil, pero demasiado angosto para ser la única fuente institucional (conservar esta observación del estado anterior).
 
 ## Pendiente
-- Corregir/compilar `extractor_json.py`.
-- Ejecutar pruebas offline del Guardián.
-- Ejecutar una demo LLM controlada sin guardar en BD.
-- Pedir a Sonnet pruebas reales del extractor, no solo código.
+- Ejecutar demo `--dry-run` post-2.1 contra texto real de la BD para medir calidad (aceptados vs rechazados).
+- Cerrar 5 decisiones de diseño de `bcb_adapter.py` e implementarlo.
+- Primera corrida controlada con `--guardar` y validar inserción en tabla `hechos`.
 - Revisar términos legales de La Razón y Opinión manualmente si se desea ampliar diarios.
 - Más adelante: inventariar otras series BCB, INE, Gaceta, Aduana, SIN.
 
 ## Siguiente
-- Validar extractor en sandbox/teléfono.
-- Solo después: integración cautious con tabla `hechos`.
-- Después: adaptador BCB para series estructuradas.
+1. Demo `--dry-run` contra texto real de la BD para medir calidad post-2.1.
+2. Diseñar e implementar `bcb_adapter.py`.
+3. Primera corrida con `--guardar` y validar inserción en tabla `hechos`.
 
 ## Fuera de alcance por ahora
 - Nube.
@@ -68,4 +69,3 @@
 - Informes finales.
 - Comercialización.
 - Habilitación de Opinión.
-- Scraping agresivo de instituciones.

@@ -38,6 +38,22 @@ MIN_LARGO_CITA = 15            # caracteres normalizados; evita citas triviales
 MAX_FRAGMENTOS_DEFECTO = 5
 TOPE_SEGUNDOS_DEFECTO = 360    # mismo tope de 6 min por corrida que el recolector
 
+# --- Afinacion 2.1 ---
+# TODO: evaluar subir a 6-8 si el prompt endurecido no degrada calidad
+# (pruebas actuales sin problemas de rendimiento)
+SUJETOS_GENERICOS = (
+    "la institucion", "el gobierno", "la entidad", "el estado", "la cartera",
+    "dicha entidad", "esta institucion", "el mismo", "la misma",
+    "ellos", "ellas", "el", "ella",
+    "la empresa", "el ministerio", "la autoridad", "las autoridades",
+    "el organismo", "esta entidad", "dicha institucion",
+)
+STOPWORDS_ES = (
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "y",
+    "o", "en", "por", "para", "con", "sin", "que", "al", "se", "su", "sus",
+    "es", "son", "ser", "como", "mas", "muy",
+)
+
 HILOS_LLM = 2                  # decision 2026-11-25: -t 2 para generacion
 MAX_TOKENS_LLM = 384
 CTX_LLM = 4096
@@ -83,9 +99,19 @@ INSTRUCCIONES = (
     "hecho | declaracion (alguien dice o afirma algo) | opinion | "
     "proyeccion (algo previsto a futuro). "
     "No escribas cifras o fechas que no esten en la cita_literal. "
+    "REGLAS DEL SUJETO: "
+    "El sujeto debe ser un nombre propio, un cargo con nombre, o una "
+    "institucion nombrada explicitamente en la cita_literal. Prohibido usar "
+    "pronombres (el, ella, ellos), anaforicos (dicha entidad, esta "
+    "institucion, el mismo) o sujetos genericos (la institucion, el "
+    "gobierno, la entidad, el estado, la cartera). "
+    "La cita_literal debe ser un fragmento contiguo del texto que contenga "
+    "al sujeto y al verbo. Si no puedes citar al sujeto literalmente, no "
+    "emitas el hecho. "
+    "Prohibido inferir atribuciones: si el texto dice 'segun X, Y hizo Z', "
+    "el sujeto es Y, no X, salvo que la accion sea 'declarar' o 'afirmar'. "
     'Si no hay afirmaciones, responde {"hechos": []}. Responde solo JSON.'
 )
-
 
 # ------------------------------------------------------------ normalizacion
 _RE_ESPACIOS = re.compile(r"\s+")
@@ -134,6 +160,23 @@ def numeros_de(texto):
 
 
 # ----------------------------------------------------------------- Guardian
+def _sin_acentos(s):
+    nfd = unicodedata.normalize("NFD", s)
+    sin = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    return unicodedata.normalize("NFC", sin)
+
+
+_RUIDO_BORDES = " .,;:\"'()[]-!?\u00ab\u00bb\u201c\u201d\u00bf\u00a1"
+
+
+def _clave_sujeto(s):
+    return _sin_acentos(normalizar_texto(s)).strip(_RUIDO_BORDES)
+
+
+_SUJETOS_GENERICOS_N = frozenset(_clave_sujeto(s) for s in SUJETOS_GENERICOS)
+_STOPWORDS_N = frozenset(_clave_sujeto(s) for s in STOPWORDS_ES)
+_RE_PALABRA = re.compile(r"\w+")
+
 def validar_hecho(hecho, fragmento):
     """El Guardian. Devuelve (True, None) o (False, motivo).
 
@@ -143,6 +186,9 @@ def validar_hecho(hecho, fragmento):
       3. cita_literal con al menos MIN_LARGO_CITA caracteres (normalizados).
       4. cita_literal existe en el fragmento original (normalizacion minima).
       5. cada numero en sujeto/accion/objeto aparece tambien en la cita_literal.
+   6. sujeto no generico (lista negra SUJETOS_GENERICOS).
+   7. alguna palabra significativa del sujeto aparece en la cita_literal.
+
     """
     if not isinstance(hecho, dict):
         return False, "estructura_invalida: el hecho no es un objeto"
@@ -169,16 +215,56 @@ def validar_hecho(hecho, fragmento):
     faltan = sorted(en_campos - en_cita)
     if faltan:
         return False, "cifra_fuera_de_cita: " + ",".join(faltan)
+    suj_n = _clave_sujeto(hecho["sujeto"])
+    if not suj_n or suj_n in _SUJETOS_GENERICOS_N:
+        return False, "sujeto_generico"
+
+    palabras = [w for w in _RE_PALABRA.findall(suj_n)
+                if len(w) > 3 and w not in _STOPWORDS_N]
+    if palabras:
+        cita_sa = _sin_acentos(cita_n)
+        if not any(w in cita_sa for w in palabras):
+            return False, "sujeto_no_en_cita"
     return True, None
 
 
 # ------------------------------------------------------------- fragmentacion
-def fragmentar(texto, max_chars=MAX_CHARS_FRAGMENTO):
-    """Parte `texto` en fragmentos de hasta `max_chars` caracteres.
+def _corte_seguro(texto, max_chars):
+    """Indice de corte para `texto` (> max_chars) sin partir palabras.
+    Prefiere '; ' y ', ' (si caen en la segunda mitad), luego espacio.
+    Sin ningun espacio (caso degenerado) corta a la fuerza."""
+    ventana = texto[:max_chars + 1]
+    minimo = max_chars // 2
+    for sep in (";", ","):
+        i = ventana.rfind(sep + " ")
+        if i >= 0 and i + 1 >= minimo and i + 1 < max_chars:
+            return i + 1
+    i = ventana.rfind(" ")
+    if i > 0 and i < max_chars:
+        return i
+    return max_chars
 
-    Cada linea no vacia es un parrafo (asi sale de trafilatura). Se juntan
-    parrafos contiguos hasta llenar el fragmento. Un parrafo mas largo que
-    max_chars se corta por oraciones y, si hace falta, a la fuerza."""
+
+def _cortar_largo(texto, max_chars):
+    piezas = []
+    resto = texto.strip()
+    while len(resto) > max_chars:
+        corte = _corte_seguro(resto, max_chars)
+        pieza = resto[:corte].strip()
+        if pieza:
+            piezas.append(pieza)
+        resto = resto[corte:].strip()
+    if resto:
+        piezas.append(resto)
+    return piezas
+
+
+def fragmentar(texto, max_chars=MAX_CHARS_FRAGMENTO):
+    """Parte `texto` en fragmentos de hasta `max_chars` caracteres, sin
+    partir palabras (salvo una 'palabra' mas larga que max_chars).
+    Cada linea no vacia es un parrafo; se juntan parrafos/oraciones
+    contiguos hasta llenar el fragmento."""
+    max_chars = max(1, int(max_chars))
     piezas = []
     for linea in texto.splitlines():
         linea = _RE_ESPACIOS.sub(" ", linea).strip()
@@ -188,11 +274,7 @@ def fragmentar(texto, max_chars=MAX_CHARS_FRAGMENTO):
             piezas.append(linea)
             continue
         for oracion in re.split(r"(?<=[.!?])\s+", linea):
-            while len(oracion) > max_chars:
-                piezas.append(oracion[:max_chars])
-                oracion = oracion[max_chars:]
-            if oracion:
-                piezas.append(oracion)
+            piezas.extend(_cortar_largo(oracion, max_chars))
     fragmentos, actual = [], ""
     for pieza in piezas:
         if actual and len(actual) + 1 + len(pieza) > max_chars:
@@ -203,7 +285,6 @@ def fragmentar(texto, max_chars=MAX_CHARS_FRAGMENTO):
     if actual:
         fragmentos.append(actual)
     return fragmentos
-
 
 # --------------------------------------------------------------------- prompt
 def _sanear_para_prompt(fragmento):

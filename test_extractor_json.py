@@ -233,7 +233,9 @@ class TestFragmentosYPrompt(unittest.TestCase):
         _, kw = r.llamadas[0]
         self.assertEqual(kw["hilos"], 2)
         self.assertEqual(kw["ctx"], 4096)
-        esquema = json.loads(kw["json_schema"])
+        esquema = kw["json_schema"]
+        if isinstance(esquema, str):
+         esquema = json.loads(esquema)
         props = esquema["properties"]["hechos"]["items"]["properties"]
         self.assertEqual(set(props), {"sujeto", "accion", "objeto", "cita_literal", "tipo"})
         self.assertEqual(

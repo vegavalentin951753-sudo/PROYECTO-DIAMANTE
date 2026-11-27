@@ -121,3 +121,26 @@
 *   **Demo `--dry-run`:** pendiente correr el extractor nuevo contra texto real de la BD para medir si el prompt endurecido mejora la calidad de los hechos aceptados o solo aumenta los rechazos. Criterio: aceptados bajan o se mantienen, rechazados suben.
 *   **`bcb_adapter.py`:** contrato de entrada y salida aprobado (analisis de ChatGPT). Pendiente definir 5 puntos antes de programar: (1) tabla destino (`series_temporales` nueva o extension de `hechos`); (2) idempotencia (`DO NOTHING` por `(serie_id, fecha)`); (3) hash del archivo (SHA-256 del archivo entero, no del array `datos`); (4) reloj (`db.ahora_utc()` inyectado como dependencia o llamado interno); (5) ubicacion del modulo (`adapters/bcb_adapter.py` si habra mas fuentes, sino raiz).
 *   **Primera corrida con `--guardar`:** pendiente validar insercion en tabla `hechos` (actualmente en 0 filas). No hacer hasta cerrar la demo.
+
+
+## [2026-11-26] - Demo dry-run post-2.1 CERRADA (con corrección)
+
+**Corrección:** la primera comparación fue inválida: `extractor_json.py` y `extractor_original.py` tenían el mismo MD5 (`fc8297ca...`); se corrió el original dos veces. El "empate" reportado era un artefacto. Se restauró el 2.1 real desde `a1c4163:extractor_json.py` y se repitió.
+
+**Comparación válida (2.1 real vs original):**
+
+| Noticia | Original | 2.1 real |
+|---|---|---|
+| v244 | 2 aceptados, 2 rechazados, 0 err | 4 aceptados, 0 rechazados, 0 err |
+| v243 | 4 aceptados, 3 rechazados, 1 err | 4 aceptados, 2 rechazados, 0 err |
+| v231 | 4 aceptados, 0 rechazados, 1 err | 2 aceptados, 2 rechazados, 0 err |
+
+**Veredicto: 2.1 gana.** Elimina los 2 truncados por fragmentación robusta. Rechaza falsos positivos que el original aceptaba ("Marka", "Balderrama", "Rodrigo Paz"). Genera sujetos más específicos. Cambia `tipo` a `declaracion` cuando corresponde. Único retroceso: en v244 aceptó "el país" como sujeto genérico (deuda menor para 2.3).
+
+**Bug A:** truncado por `max_tokens=384`, no control character. Parche defensivo aplicado (`strict=False` + rescate de hechos completos antes del corte). 9 tests nuevos en `test_extractor_22.py`. Total 78/78 OK. No cambia comportamiento en v244/v243/v231; protege contra noticias largas futuras.
+
+**Bug B:** falso positivo (archivo equivocado). El 2.1 rechaza "Marka" por `sujeto_no_en_cita`. Test conservado como contrato.
+
+**Modelo local:** no se cambia. Qwen 1.5B + 2.1 es suficiente. Reevaluar si truncado reaparece o falsos positivos suben con corpus completo.
+
+**Pendiente post-cierre (lunes 2026-12-01):** `--guardar` sobre v244/v243/v231 · higiene de BDs duplicadas · fix UX `--input` · decidir MAX_TOKENS/MAX_HECHOS/maxLength cita · `bcb_adapter.py`.

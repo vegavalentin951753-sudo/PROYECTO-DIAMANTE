@@ -322,21 +322,58 @@ def _llamar_llm(prompt, runner, timeout_s):
     return resp
 
 
-def extraer_hechos_de_salida(salida):
-    """Parsea la salida cruda del modelo. Devuelve (lista, error|None).
-    Tolera texto antes/despues del JSON (toma el primer objeto completo)."""
+# strict=False: tolera \n o \t crudos dentro de un string (no cambia nada mas).
+_DECODIFICADOR = json.JSONDecoder(strict=False)
+
+
+def _recuperar_hechos_completos(texto):
+    """`texto` empieza en '{'. Si la salida se corto a medias (p. ej. por el
+    tope de tokens), devuelve los objetos de la lista "hechos" que SI quedaron
+    completos, en orden. Cada uno pasa despues por el Guardian como cualquier
+    otro. Devuelve [] si no hay ninguno."""
+    m = re.search(r'"hechos"\s*:\s*\[', texto)
+    if not m:
+        return []
+    pos, recuperados = m.end(), []
+    while True:
+        while pos < len(texto) and texto[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(texto) or texto[pos] != "{":
+            break
+        try:
+            obj, pos = _DECODIFICADOR.raw_decode(texto, pos)
+        except json.JSONDecodeError:
+            break
+        recuperados.append(obj)
+    return recuperados
+
+
+def _parsear_salida(salida):
+    """Devuelve (lista, error|None, recuperado). `recuperado` es True si el
+    JSON estaba cortado y se rescataron los hechos completos que traia."""
     if not isinstance(salida, str) or not salida.strip():
-        return [], "salida_vacia"
+        return [], "salida_vacia", False
     inicio = salida.find("{")
     if inicio < 0:
-        return [], "json_invalido: no hay objeto JSON"
+        return [], "json_invalido: no hay objeto JSON", False
+    texto = salida[inicio:]
     try:
-        obj, _ = json.JSONDecoder().raw_decode(salida[inicio:])
+        obj, _ = _DECODIFICADOR.raw_decode(texto)
     except json.JSONDecodeError as e:
-        return [], f"json_invalido: {e.msg} (pos {e.pos})"
+        rescatados = _recuperar_hechos_completos(texto)
+        if rescatados:
+            return rescatados[:MAX_HECHOS_POR_FRAGMENTO], None, True
+        return [], f"json_invalido: {e.msg} (pos {e.pos})", False
     if not isinstance(obj, dict) or not isinstance(obj.get("hechos"), list):
-        return [], "json_sin_lista_hechos"
-    return obj["hechos"][:MAX_HECHOS_POR_FRAGMENTO], None
+        return [], "json_sin_lista_hechos", False
+    return obj["hechos"][:MAX_HECHOS_POR_FRAGMENTO], None, False
+
+
+def extraer_hechos_de_salida(salida):
+    """Parsea la salida cruda del modelo. Devuelve (lista, error|None).
+    Tolera texto antes/despues del JSON y salidas cortadas (ver _parsear_salida)."""
+    lista, err, _ = _parsear_salida(salida)
+    return lista, err
 
 
 # ------------------------------------------------ procesamiento de un fragmento
@@ -356,18 +393,24 @@ def procesar_fragmento(fragmento, runner=None, timeout_s=TIMEOUT_FRAGMENTO_S):
         return res
 
     resp = _llamar_llm(construir_prompt(fragmento), runner, timeout_s)
-    res["meta"] = {k: resp.get(k) for k in ("gen_tokens", "gen_tps") if k in resp}
+    perf = resp.get("perf") if isinstance(resp.get("perf"), dict) else {}
+    res["meta"] = {k: resp.get(k, perf.get(k)) for k in ("gen_tokens", "gen_tps")
+                   if resp.get(k, perf.get(k)) is not None}
     if not resp.get("ok"):
         motivo = "timeout" if resp.get("timeout") else (resp.get("err") or "sin_detalle")
         res["error"] = f"llm_fallo: {motivo}"
         log.error("fragmento descartado: %s", res["error"])
         return res
 
-    hechos, err = extraer_hechos_de_salida(resp.get("salida"))
+    hechos, err, recuperado = _parsear_salida(resp.get("salida"))
     if err:
         res["error"] = err
         log.error("fragmento descartado: %s", err)
         return res
+    if recuperado:
+        res["meta"]["salida_recuperada"] = True
+        log.warning("salida cortada (gen_tokens=%s de %s): se rescataron %d hechos completos",
+                    res["meta"].get("gen_tokens"), MAX_TOKENS_LLM, len(hechos))
 
     for hecho in hechos:
         try:

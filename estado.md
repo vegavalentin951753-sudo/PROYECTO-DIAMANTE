@@ -33,17 +33,19 @@
   - 6 hilos: pp128 ~36.14 t/s, tg32 ~10.18 t/s.
 - Decisión técnica: para generación usar `-t 2`, porque mejora tg32 en este Snapdragon 720G.
 
-## Extractor Semántico (Módulo 2.1 - Cerrado el 2026-11-26)
-- **Estado:** MÓDULO 2.1 CERRADO Y VALIDADO (commit `a1c4163` en `main`).
-- `extractor_json.py` y `test_extractor_21.py` probados en Termux (Python 3.14.10).
-- **69/69 tests pasan en el teléfono** usando `unittest` (62 anteriores + 7 nuevos del Módulo 2.1).
-- **Aislamiento verificado:** no importa `sqlite3` ni librerías de red.
-- **Afinación 2.1 aplicada:**
-  - Fragmentación sin cortar palabras (`_corte_seguro` + `_cortar_largo`).
-  - Prompt endurecido con 3 reglas explícitas de sujeto.
-  - Guardián ampliado con `sujeto_generico` y `sujeto_no_en_cita`.
-- **Decisión de diseño:** `SCHEMA_COMO_TEXTO = False` (validado en hardware real; `llm_runner` serializa internamente).
-- **Modo seguro:** El script asume `--dry-run` por defecto. El flag `--guardar` está implementado pero no se ha ejecutado contra la BD real.
+## Extractor Semántico (Módulo 2.1 + parche defensivo 2.2 - Cerrado 2026-11-26)
+- **Estado:** CERRADO Y VALIDADO. Commit `a1c4163` (2.1) + parche defensivo Bug A sin commitear aún.
+- **78/78 tests OK** en Termux (Python 3.14.10): 62 base + 7 del 2.1 + 9 del parche defensivo.
+- **Comparación 2.1 vs original (válida, 3 noticias reales):**
+  - v244: original 2 aceptados / 2.1 4 aceptados (recupera 2 válidos).
+  - v243: original 1 error truncado / 2.1 0 errores + rechaza 3 falsos positivos de "Marka".
+  - v231: original 1 error truncado / 2.1 0 errores + rechaza 2 falsos positivos.
+  - **Veredicto: 2.1 gana.** Elimina truncados por fragmentación robusta, filtra sujetos fuera de cita, mejora tipo a `declaracion`.
+- **Bug A (truncado por tope de tokens):** parche defensivo aplicado (`strict=False` + rescate de hechos completos antes del corte). No se reproduce en las 3 noticias con el 2.1, pero protege contra futuras noticias largas.
+- **Bug B (falso positivo):** el 2.1 rechaza "Marka" por `sujeto_no_en_cita`. El test se conserva como contrato.
+- **Aislamiento:** no importa `sqlite3` ni librerías de red.
+- **`SCHEMA_COMO_TEXTO = False`.** `HILOS_LLM = 2`. `MAX_TOKENS_LLM = 384`. `MAX_HECHOS_POR_FRAGMENTO = 5`.
+- **`--guardar` implementado pero NO ejecutado contra la BD real todavía.**
 
 ## Fuentes estructuradas / BCB
 - Se confirmó que una serie pública del BCB corresponde a tipo de cambio USD/BOB.
@@ -52,16 +54,17 @@
 - Útil, pero demasiado angosto para ser la única fuente institucional (conservar esta observación del estado anterior).
 
 ## Pendiente
-- Ejecutar demo `--dry-run` post-2.1 contra texto real de la BD para medir calidad (aceptados vs rechazados).
 - Cerrar 5 decisiones de diseño de `bcb_adapter.py` e implementarlo.
 - Primera corrida controlada con `--guardar` y validar inserción en tabla `hechos`.
 - Revisar términos legales de La Razón y Opinión manualmente si se desea ampliar diarios.
 - Más adelante: inventariar otras series BCB, INE, Gaceta, Aduana, SIN.
 
 ## Siguiente
-1. Demo `--dry-run` contra texto real de la BD para medir calidad post-2.1.
-2. Diseñar e implementar `bcb_adapter.py`.
-3. Primera corrida con `--guardar` y validar inserción en tabla `hechos`.
+1. Primera corrida `--guardar` controlada sobre v244, v243, v231 (ya validadas en dry-run).
+2. Higiene de BDs: `~/diamante.db` (raíz) → renombrar a `.old_esquema_viejo`. `~/repo_github/diamante.db` → confirmar `.gitignore`. `~/diamante_backup_20261126/` → conservar.
+3. Fix UX `--input`: si parece ruta (empieza con `/`, `./`, `~/`, `../` o termina en `.txt/.md/.json/.html`) y no existe → `FileNotFoundError`, no procesar como texto.
+4. Decidir (con datos post-`--guardar`): subir `MAX_TOKENS_LLM` a 512, bajar `MAX_HECHOS_POR_FRAGMENTO` a 3, o limitar `maxLength` de `cita_literal` en schema.
+5. `bcb_adapter.py` (5 decisiones de diseño pendientes).
 
 ## Fuera de alcance por ahora
 - Nube.

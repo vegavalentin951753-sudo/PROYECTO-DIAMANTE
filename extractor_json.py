@@ -13,7 +13,9 @@ directamente. Solo usa llm_runner (modelo) y db (conectar / ahora_utc).
 Por defecto corre en modo --dry-run: no escribe nada.
 
 Codigos de salida: 0 ok | 1 entrada vacia o ilegible | 2 argumentos
-invalidos | 3 todos los fragmentos procesados fallaron (LLM o JSON).
+invalidos | 3 todos los fragmentos procesados fallaron (LLM, JSON o guardado)
+| 4 la base no tiene el esquema v4 (indice unico de hechos); no se llamo al
+modelo | 5 algun fragmento no se pudo guardar (el resto si se guardo).
 """
 import argparse
 import json
@@ -384,7 +386,7 @@ def procesar_fragmento(fragmento, runner=None, timeout_s=TIMEOUT_FRAGMENTO_S):
     "motivo"}], "error": str|None, "meta": {...}}. `error` no nulo significa
     que el fragmento entero fallo (LLM o JSON); sin hechos no es error."""
     res = {"fragmento": fragmento, "aceptados": [], "rechazados": [],
-           "error": None, "meta": {}}
+           "error": None, "meta": {}, "orden": ""}
     try:
         runner = runner or _runner_por_defecto()
     except Exception as e:
@@ -394,7 +396,8 @@ def procesar_fragmento(fragmento, runner=None, timeout_s=TIMEOUT_FRAGMENTO_S):
 
     resp = _llamar_llm(construir_prompt(fragmento), runner, timeout_s)
     perf = resp.get("perf") if isinstance(resp.get("perf"), dict) else {}
-    res["meta"] = {k: resp.get(k, perf.get(k)) for k in ("gen_tokens", "gen_tps")
+    res["meta"] = {k: resp.get(k, perf.get(k))
+                   for k in ("gen_tokens", "gen_tps", "prompt_tokens", "segundos", "ram_pico_mb")
                    if resp.get(k, perf.get(k)) is not None}
     if not resp.get("ok"):
         motivo = "timeout" if resp.get("timeout") else (resp.get("err") or "sin_detalle")
@@ -417,6 +420,7 @@ def procesar_fragmento(fragmento, runner=None, timeout_s=TIMEOUT_FRAGMENTO_S):
             ok, motivo = validar_hecho(hecho, fragmento)
         except Exception as e:  # defensa final: el Guardian jamas debe romper el lote
             ok, motivo = False, f"guardian_excepcion: {type(e).__name__}"
+        res["orden"] += "A" if ok else "R"   # veredicto por posicion en la salida del modelo
         if ok:
             res["aceptados"].append(hecho)
         else:
@@ -440,24 +444,53 @@ def _txt(valor):
 def guardar_resultado(conn, version_id, resultado, ahora):
     """Una transaccion por fragmento. Aceptados -> estado 'validado'.
     Rechazados (con forma de objeto) -> estado 'rechazado' + motivo.
-    Devuelve (n_validados, n_rechazados) realmente enviados al INSERT."""
-    filas = []
+
+    Devuelve un dict con lo que SQLite hizo de verdad (se mide con rowcount de
+    cada INSERT, no con las filas preparadas):
+      validadas_insertadas, rechazadas_insertadas  -> filas nuevas
+      validadas_omitidas,   rechazadas_omitidas    -> ya existian (indice unico)
+      sin_registro -> rechazados sin forma de objeto (no hay nada que guardar)
+    Solo ON CONFLICT DO NOTHING silencia algo, y solo conflictos de unicidad:
+    cualquier otro error (FK, CHECK, NOT NULL, disco) lanza la excepcion y
+    revierte TODO el fragmento; los contadores no se devuelven.
+    Para que la repeticion sea idempotente la base debe tener el indice unico
+    ux_hechos_identidad (esquema v4); main() lo exige antes de llamar al modelo."""
+    filas = []   # (es_validado, parametros)
     for h in resultado["aceptados"]:
-        filas.append((version_id, _txt(h.get("sujeto")), _txt(h.get("accion")),
-                      _txt(h.get("objeto")), h["cita_literal"], h["tipo"],
-                      "validado", None, ahora))
-    n_val = len(filas)
+        filas.append((True, (version_id, _txt(h.get("sujeto")), _txt(h.get("accion")),
+                             _txt(h.get("objeto")), h["cita_literal"], h["tipo"],
+                             "validado", None, ahora)))
+    sin_registro = 0
     for r in resultado["rechazados"]:
         h = r["hecho"]
         if not isinstance(h, dict):
-            continue  # sin estructura no hay nada que registrar
+            sin_registro += 1  # sin estructura no hay nada que registrar
+            continue
         tipo = h.get("tipo") if h.get("tipo") in TIPOS_VALIDOS else "hecho"
-        filas.append((version_id, _txt(h.get("sujeto")), _txt(h.get("accion")),
-                      _txt(h.get("objeto")), _txt(h.get("cita_literal")), tipo,
-                      "rechazado", r["motivo"], ahora))
+        filas.append((False, (version_id, _txt(h.get("sujeto")), _txt(h.get("accion")),
+                              _txt(h.get("objeto")), _txt(h.get("cita_literal")), tipo,
+                              "rechazado", r["motivo"], ahora)))
+    cont = {"validadas_insertadas": 0, "validadas_omitidas": 0,
+            "rechazadas_insertadas": 0, "rechazadas_omitidas": 0,
+            "sin_registro": sin_registro}
     with conn:  # commit al salir bien, rollback si algo falla
-        conn.executemany(_SQL_INSERT_HECHO, filas)
-    return n_val, len(filas) - n_val
+        for es_validado, params in filas:
+            n = conn.execute(_SQL_INSERT_HECHO, params).rowcount
+            if n not in (0, 1):  # no adivinamos: mejor revertir que contar mal
+                raise RuntimeError(f"rowcount inesperado al insertar un hecho: {n!r}")
+            clase = "validadas" if es_validado else "rechazadas"
+            cont[f"{clase}_insertadas" if n == 1 else f"{clase}_omitidas"] += 1
+    return cont
+
+
+INDICE_IDENTIDAD = "ux_hechos_identidad"   # debe coincidir con db_setup.NOMBRE_INDICE_HECHOS
+
+
+def esquema_listo_para_guardar(conn):
+    """True si `hechos` tiene el indice unico de identidad (esquema v4). Sin el,
+    ON CONFLICT DO NOTHING no detecta repetidos y reejecutar duplicaria filas."""
+    return any(f[1] == INDICE_IDENTIDAD and f[2] == 1
+               for f in conn.execute("PRAGMA index_list(hechos)"))
 
 
 def _cargar_db():
@@ -466,18 +499,91 @@ def _cargar_db():
 
 
 # ------------------------------------------------------------------------ CLI
+PREFIJOS_RUTA = ("/", "./", "~/", "../")
+EXTENSIONES_ARCHIVO = (".txt", ".md", ".json", ".html")
+
+
+def parece_ruta(valor):
+    """True si --input tiene pinta de ruta de archivo: empieza con /, ./, ~/ o ../,
+    o termina en .txt/.md/.json/.html. Un valor con saltos de linea es texto."""
+    v = valor.strip()
+    if not v or "\n" in v or "\r" in v:
+        return False
+    return v.startswith(PREFIJOS_RUTA) or v.lower().endswith(EXTENSIONES_ARCHIVO)
+
+
 def leer_entrada(valor):
-    """--input puede ser una ruta de archivo o el texto mismo."""
-    if os.path.isfile(valor):
-        with open(valor, "r", encoding="utf-8", errors="replace") as f:
+    """--input puede ser una ruta de archivo o el texto mismo.
+      - archivo existente (con o sin pinta de ruta) -> se lee
+      - pinta de ruta y no existe -> FileNotFoundError (NUNCA se procesa como texto)
+      - pinta de ruta y es una carpeta -> IsADirectoryError
+      - cualquier otra cosa -> texto literal"""
+    pinta = parece_ruta(valor)
+    candidato = os.path.expanduser(valor.strip()) if pinta else valor
+    if os.path.isfile(candidato):
+        with open(candidato, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
+    if pinta:
+        if os.path.isdir(candidato):
+            raise IsADirectoryError(f"--input es una carpeta, no un archivo: {valor!r}")
+        raise FileNotFoundError(
+            f"--input parece una ruta de archivo y no existe: {valor!r}. Si querias pasar texto "
+            "literal, no lo empieces con / ./ ~/ ../ ni lo termines en .txt .md .json .html")
     return valor
+
+
+# ------------------------------------------------------------------ metricas
+def _percentil(valores, p):
+    if not valores:
+        return None
+    v = sorted(valores)
+    return v[min(len(v) - 1, int(round(p / 100 * (len(v) - 1))))]
+
+
+def resumir_metricas(resultados):
+    """Lineas de texto con lo necesario para decidir MAX_TOKENS_LLM,
+    MAX_HECHOS_POR_FRAGMENTO y un tope de largo de cita_literal con datos.
+    No escribe nada; es solo medicion de la corrida."""
+    n = len(resultados)
+    if not n:
+        return []
+    gen = [r["meta"]["gen_tokens"] for r in resultados if "gen_tokens" in r["meta"]]
+    segs = [r["meta"]["segundos"] for r in resultados if "segundos" in r["meta"]]
+    recuperadas = sum(1 for r in resultados if r["meta"].get("salida_recuperada"))
+    json_malo = sum(1 for r in resultados if (r["error"] or "").startswith("json_invalido"))
+    por_frag = [len(r["aceptados"]) + len(r["rechazados"]) for r in resultados if not r["error"]]
+    en_tope = sum(1 for k in por_frag if k >= MAX_HECHOS_POR_FRAGMENTO)
+    citas = [len(h["cita_literal"]) for r in resultados for h in r["aceptados"]]
+    posiciones = {}
+    for r in resultados:
+        for i, veredicto in enumerate(r.get("orden", ""), 1):
+            a_r = posiciones.setdefault(i, [0, 0])
+            a_r[0 if veredicto == "A" else 1] += 1
+    motivos = {}
+    for r in resultados:
+        for rr in r["rechazados"]:
+            clave = rr["motivo"].split(":")[0]
+            motivos[clave] = motivos.get(clave, 0) + 1
+    lineas = ["Metricas:"]
+    lineas.append(f"  tokens: tope={MAX_TOKENS_LLM} gen_tokens_por_fragmento={gen} "
+                  f"salida_recuperada={recuperadas} json_invalido={json_malo}")
+    if segs:
+        lineas.append(f"  tiempo: segundos_por_fragmento={segs} total={round(sum(segs), 1)}")
+    lineas.append(f"  hechos_por_fragmento={por_frag} fragmentos_en_tope({MAX_HECHOS_POR_FRAGMENTO})={en_tope}")
+    lineas.append("  veredicto_por_posicion(A/R)=" + (", ".join(
+        f"#{i}:{a}/{r}" for i, (a, r) in sorted(posiciones.items())) or "-"))
+    lineas.append(f"  cita_literal_aceptada_chars: n={len(citas)} p50={_percentil(citas, 50)} "
+                  f"p90={_percentil(citas, 90)} max={max(citas) if citas else None}")
+    lineas.append("  motivos_rechazo=" + (", ".join(f"{k}:{v}" for k, v in sorted(motivos.items())) or "-"))
+    return lineas
 
 
 def construir_parser():
     p = argparse.ArgumentParser(
         description="Extractor semantico JSON de Diamante (por defecto: --dry-run).")
-    p.add_argument("--input", required=True, help="texto o ruta de un archivo .txt")
+    p.add_argument("--input", required=True,
+                   help="texto literal o ruta de un archivo (/, ./, ~/, ../ o .txt/.md/.json/.html); "
+                        "una ruta que no existe es un error")
     p.add_argument("--max-fragmentos", type=int, default=MAX_FRAGMENTOS_DEFECTO)
     p.add_argument("--max-segundos", type=int, default=TOPE_SEGUNDOS_DEFECTO,
                    help="no empieza fragmentos nuevos pasado este tiempo")
@@ -487,7 +593,7 @@ def construir_parser():
     modo.add_argument("--dry-run", action="store_true",
                       help="no escribe nada (es el modo por defecto)")
     modo.add_argument("--guardar", action="store_true",
-                      help="inserta en la tabla hechos usando db.conectar()")
+                      help="inserta en la tabla hechos usando db.conectar() (exige esquema v4)")
     return p
 
 
@@ -530,9 +636,17 @@ def main(argv=None, runner=None):
     if args.guardar:
         conectar, ahora_utc = _cargar_db()
         conn = conectar()
+        if not esquema_listo_para_guardar(conn):
+            conn.close()
+            log.error("la base no tiene el indice unico %s (esquema v4): reejecutar duplicaria "
+                      "hechos. No se llamo al modelo ni se escribio nada. Ejecuta: python db_setup.py",
+                      INDICE_IDENTIDAD)
+            return 4
 
-    n_ok = n_rech = n_err = n_guardados = 0
+    n_ok = n_rech = n_err_proc = n_err_guardado = 0
+    ins_val = ins_rech = omi_val = omi_rech = sin_reg = 0
     procesados = 0
+    resultados = []
     t0 = time.monotonic()
     try:
         for i, frag in enumerate(fragmentos, 1):
@@ -541,26 +655,45 @@ def main(argv=None, runner=None):
                 break
             res = procesar_fragmento(frag, runner=runner)
             procesados += 1
-            if args.guardar and not res["error"]:
-                try:
-                    v, r = guardar_resultado(conn, args.version_id, res, ahora_utc())
-                    n_guardados += v + r
-                except Exception as e:  # p. ej. version_id inexistente (FK)
-                    res["error"] = f"guardado_fallo: {type(e).__name__}: {e}"
-                    log.error("%s", res["error"])
-            n_ok += len(res["aceptados"])
+            resultados.append(res)
+            n_ok += len(res["aceptados"])        # veredicto del Guardian, se guarde o no
             n_rech += len(res["rechazados"])
-            n_err += 1 if res["error"] else 0
+            if res["error"]:
+                n_err_proc += 1
+            elif args.guardar:
+                try:
+                    c = guardar_resultado(conn, args.version_id, res, ahora_utc())
+                    ins_val += c["validadas_insertadas"]
+                    ins_rech += c["rechazadas_insertadas"]
+                    omi_val += c["validadas_omitidas"]
+                    omi_rech += c["rechazadas_omitidas"]
+                    sin_reg += c["sin_registro"]
+                except Exception as e:  # p. ej. version_id inexistente (FK); el fragmento se revirtio entero
+                    res["error"] = f"guardado_fallo: {type(e).__name__}: {e}"
+                    n_err_guardado += 1
+                    log.error("%s", res["error"])
             _mostrar(i, len(fragmentos), res)
     finally:
         if conn is not None:
             conn.close()
 
+    n_err = n_err_proc + n_err_guardado
     modo = "guardar" if args.guardar else "dry-run"
-    print(f"\nResumen [{modo}]: fragmentos={procesados}/{total_hallados} "
-          f"aceptados={n_ok} rechazados={n_rech} errores={n_err}"
-          + (f" filas_insertadas={n_guardados}" if args.guardar else " (nada escrito)"))
-    return 3 if procesados and n_err == procesados else 0
+    linea = (f"\nResumen [{modo}]: fragmentos={procesados}/{total_hallados} "
+             f"aceptados={n_ok} rechazados={n_rech} errores={n_err} "
+             f"(proceso={n_err_proc} guardado={n_err_guardado})")
+    if args.guardar:
+        linea += (f" filas_insertadas={ins_val + ins_rech} (validadas={ins_val} rechazadas={ins_rech})"
+                  f" omitidas_por_duplicado={omi_val + omi_rech} (validadas={omi_val} rechazadas={omi_rech})"
+                  f" rechazados_sin_registro={sin_reg}")
+    else:
+        linea += " (nada escrito)"
+    print(linea)
+    for l in resumir_metricas(resultados):
+        print(l)
+    if procesados and n_err == procesados:
+        return 3
+    return 5 if n_err_guardado else 0
 
 
 if __name__ == "__main__":

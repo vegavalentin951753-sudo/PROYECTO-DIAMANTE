@@ -19,6 +19,7 @@ import types
 import unittest
 from unittest import mock
 
+import db_setup
 import extractor_json as ex
 
 FRAG = (
@@ -318,6 +319,9 @@ CREATE TABLE hechos (
 );
 INSERT INTO versiones (id) VALUES (1);
 """
+# 2026-11-27: el esquema real es v4 y --guardar exige el indice unico de hechos.
+# Se toma la definicion de db_setup (una sola fuente de verdad); los tests no cambian.
+ESQUEMA_PRUEBA += db_setup.SQL_INDICE_HECHOS
 FECHA = "2026-11-26T12:00:00Z"
 
 

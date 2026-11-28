@@ -1,10 +1,15 @@
-"""Crea, migra o verifica el esquema de diamante.db (v3). Se puede ejecutar varias veces sin riesgo."""
+"""Crea, migra o verifica el esquema de diamante.db (v4). Se puede ejecutar varias veces sin riesgo.
+
+v4 (2026-11-27): indice unico ux_hechos_identidad sobre `hechos`, para que reejecutar el
+extractor sobre una misma version no multiplique hechos identicos. La migracion v3 -> v4
+NO borra ni modifica filas: si ya hay duplicados, se detiene y los lista.
+"""
 import sqlite3
 import sys
 
 from db import DB_PATH, conectar
 
-VERSION_ESQUEMA = 3
+VERSION_ESQUEMA = 4
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS documentos (
@@ -100,25 +105,116 @@ def migrar_v2_a_v3(conn):
     conn.commit()
 
 
-def main():
-    conn = conectar()
+NOMBRE_INDICE_HECHOS = "ux_hechos_identidad"
+
+# Identidad de un hecho = version + tipo + estado + sujeto + accion + objeto + cita literal.
+# COALESCE: en SQLite un UNIQUE normal NO detecta repetidos si alguna columna es NULL
+# (NULL != NULL), y sujeto/accion/objeto admiten NULL. Con COALESCE, NULL y '' son lo mismo.
+# `estado` entra en la clave a proposito: si el Guardian cambia, una misma cita puede quedar
+# como 'rechazado' (historial) y luego como 'validado' sin pisarse.
+SQL_INDICE_HECHOS = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {NOMBRE_INDICE_HECHOS} ON hechos (
+    version_id, tipo, estado,
+    COALESCE(sujeto, ''), COALESCE(accion, ''), COALESCE(objeto, ''),
+    cita_literal
+);
+"""
+
+SQL_DUPLICADOS_HECHOS = """
+SELECT version_id, tipo, estado, COALESCE(sujeto, ''), COALESCE(accion, ''),
+       COALESCE(objeto, ''), cita_literal, COUNT(*) AS n, GROUP_CONCAT(id)
+FROM hechos
+GROUP BY 1, 2, 3, 4, 5, 6, 7
+HAVING COUNT(*) > 1
+ORDER BY n DESC, version_id
+LIMIT ?
+"""
+
+
+class DuplicadosEnHechos(Exception):
+    """Ya existen hechos repetidos: no se puede crear el indice unico sin decidir cual conservar."""
+
+    def __init__(self, grupos):
+        super().__init__(f"{len(grupos)} grupo(s) de hechos duplicados")
+        self.grupos = grupos
+
+
+class EsquemaDesconocido(Exception):
+    def __init__(self, version):
+        super().__init__(f"user_version={version}")
+        self.version = version
+
+
+def duplicados_en_hechos(conn, limite=20):
+    """Solo lectura. Lista de (version_id, tipo, estado, sujeto, accion, objeto, cita, n, ids)."""
+    return [tuple(f) for f in conn.execute(SQL_DUPLICADOS_HECHOS, (limite,))]
+
+
+def indice_hechos_existe(conn):
+    """True si el indice unico de identidad existe y es realmente UNIQUE."""
+    return any(f[1] == NOMBRE_INDICE_HECHOS and f[2] == 1
+               for f in conn.execute("PRAGMA index_list(hechos)"))
+
+
+def migrar_v3_a_v4(conn):
+    """Crea el indice unico y marca user_version=4, TODO en una transaccion.
+
+    Si hay duplicados, lanza DuplicadosEnHechos sin cambiar nada (ni el indice ni la
+    version). Nunca borra filas. Segura si se repite (el indice usa IF NOT EXISTS)."""
+    conn.execute("BEGIN IMMEDIATE")      # bloquea escritores: la revision y el CREATE ven lo mismo
+    try:
+        grupos = duplicados_en_hechos(conn)
+        if grupos:
+            raise DuplicadosEnHechos(grupos)
+        conn.execute(SQL_INDICE_HECHOS)
+        conn.execute(f"PRAGMA user_version={VERSION_ESQUEMA}")
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def aplicar_esquema(conn):
+    """Crea o migra hasta la version actual. Lanza EsquemaDesconocido o DuplicadosEnHechos."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     tablas = {f[0] for f in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-
+    migrado_v2 = False
     if "documentos" in tablas:
         if version == 2:
             migrar_v2_a_v3(conn)
-            print("Migrado de esquema v2 a v3 (columnas de revisión añadidas).")
-        elif version != VERSION_ESQUEMA:
-            conn.close()
-            print("Hay una base con un esquema desconocido (user_version=%d) en: %s" % (version, DB_PATH))
-            print("Renómbrala y vuelve a ejecutar este script:")
-            print("    mv diamante.db diamante_viejo.db")
-            return 1
+            version, migrado_v2 = 3, True
+        elif version not in (3, VERSION_ESQUEMA):
+            raise EsquemaDesconocido(version)
+    conn.executescript(ESQUEMA)          # solo CREATE ... IF NOT EXISTS; no toca filas
+    if version < VERSION_ESQUEMA or not indice_hechos_existe(conn):
+        migrar_v3_a_v4(conn)
+    return {"version_previa": version, "migrado_v2": migrado_v2}
 
-    conn.executescript(ESQUEMA)
-    conn.execute(f"PRAGMA user_version={VERSION_ESQUEMA}")
-    conn.commit()
+
+def main():
+    conn = conectar()
+    try:
+        info = aplicar_esquema(conn)
+    except EsquemaDesconocido as e:
+        conn.close()
+        print("Hay una base con un esquema desconocido (user_version=%d) en: %s" % (e.version, DB_PATH))
+        print("Renómbrala y vuelve a ejecutar este script:")
+        print("    mv diamante.db diamante_viejo.db")
+        return 1
+    except DuplicadosEnHechos as e:
+        conn.close()
+        print("NO se migró a v4: la tabla hechos ya tiene filas repetidas (no se borró ni cambió nada).")
+        print("Base:", DB_PATH)
+        for v, tipo, estado, suj, acc, obj, cita, n, ids in e.grupos[:10]:
+            print("  version_id=%s %s/%s x%d ids=%s | %s | %s" % (v, tipo, estado, n, ids, suj[:40], cita[:60]))
+        print("Decide qué filas conservar (con un backup hecho) y vuelve a ejecutar este script.")
+        return 1
+    if info["migrado_v2"]:
+        print("Migrado de esquema v2 a v3 (columnas de revisión añadidas).")
+    if info["version_previa"] < VERSION_ESQUEMA:
+        print("Migrado a esquema v%d (índice único %s creado; ninguna fila modificada)." % (
+            VERSION_ESQUEMA, NOMBRE_INDICE_HECHOS))
 
     try:
         conn.execute("CREATE VIRTUAL TABLE temp._prueba_fts USING fts5(x)")
@@ -128,11 +224,12 @@ def main():
         fts5 = f"NO disponible ({e})"
 
     print("Base de datos:", DB_PATH)
-    print("Esquema v%d | journal_mode=%s | integrity_check=%s | FTS5: %s" % (
+    print("Esquema v%d | journal_mode=%s | integrity_check=%s | FTS5: %s | índice único hechos: %s" % (
         VERSION_ESQUEMA,
         conn.execute("PRAGMA journal_mode").fetchone()[0],
         conn.execute("PRAGMA integrity_check").fetchone()[0],
         fts5,
+        "ok" if indice_hechos_existe(conn) else "FALTA",
     ))
     print("Tablas:", ", ".join(sorted(
         f[0] for f in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")

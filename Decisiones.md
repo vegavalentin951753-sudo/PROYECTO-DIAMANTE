@@ -144,3 +144,39 @@
 **Modelo local:** no se cambia. Qwen 1.5B + 2.1 es suficiente. Reevaluar si truncado reaparece o falsos positivos suben con corpus completo.
 
 **Pendiente post-cierre (lunes 2026-12-01):** `--guardar` sobre v244/v243/v231 · higiene de BDs duplicadas · fix UX `--input` · decidir MAX_TOKENS/MAX_HECHOS/maxLength cita · `bcb_adapter.py`.
+
+## [2026-11-27] - Parche defensivo 2.2 (Bug A) registrado como entrada propia
+*   **Hecho:** salida del LLM truncada por `MAX_TOKENS_LLM=384` → `strict=False` + rescate de los hechos completos anteriores al corte (`_recuperar_hechos_completos`). Los rescatados pasan por el Guardian como cualquier otro. `meta["salida_recuperada"]` lo marca.
+*   **Estado:** 9 tests en `test_extractor_22.py`; suite entonces 78/78. Hasta 2026-11-27 constaba solo dentro de la entrada de la demo y **sin commit**: se commitea aparte, antes de 2.3.
+*   **No cambia** `MAX_TOKENS_LLM`: eso se decide con las métricas de la 1.ª persistencia.
+
+## [2026-11-27] - Idempotencia de `hechos`: esquema v4 e índice único
+*   **Problema:** `hechos` no tenía restricción UNIQUE; `ON CONFLICT DO NOTHING` no producía ningún conflicto y reejecutar el extractor multiplicaba filas. Probado: sin índice 2 filas; con UNIQUE simple y objeto NULL, 3 filas (NULL ≠ NULL).
+*   **Decisión:** índice único `ux_hechos_identidad` sobre `(version_id, tipo, estado, COALESCE(sujeto,''), COALESCE(accion,''), COALESCE(objeto,''), cita_literal)`. `user_version` pasa a 4.
+*   **Por qué esa clave:** `estado` entra para que, si el Guardian cambia, una cita rechazada antes y validada ahora convivan sin pisarse (queda historial; `auditar` marca los contradictorios). `tipo` entra para no descartar información por una reclasificación del modelo. La fecha no entra (cambia en cada corrida). `motivo_rechazo` no entra (deriva del estado).
+*   **Alternativas descartadas:** (a) UNIQUE simple: falla con NULL. (b) columna `huella` con hash: obliga a `ALTER TABLE` y a que todo escritor la calcule; más piezas. (c) `INSERT OR IGNORE`: silenciaría también errores de FK/CHECK/NOT NULL (ya descartado el 2026-11-24). (d) borrar duplicados para poder crear el índice: prohibido.
+*   **Migración v3→v4:** una transacción `BEGIN IMMEDIATE`: revisa duplicados → crea índice → `user_version=4`. Si hay duplicados no cambia nada y los lista. Si falla el COMMIT revierte todo (probado). Nunca borra ni modifica filas.
+*   **Límite conocido:** la clave compara texto exacto. Una cita con distinta puntuación o espacios cuenta como otro hecho. Con `--temp 0` el modelo es determinista, así que una reejecución sobre el mismo texto produce las mismas filas. Un Guardian más estricto en el futuro no retira filas ya validadas: requeriría un módulo de revalidación.
+*   **Enforcement:** `--guardar` verifica el índice antes de llamar al modelo (código de salida 4).
+
+## [2026-11-27] - Conteo real de inserciones y códigos de salida
+*   **Problema:** `guardar_resultado` devolvía filas preparadas y el resumen las llamaba "insertadas".
+*   **Decisión:** se cuenta con `rowcount` de cada INSERT (1 = nueva, 0 = omitida por duplicado; otro valor → error y rollback). El resumen separa veredicto del Guardian, `filas_insertadas`, `omitidas_por_duplicado`, `rechazados_sin_registro` y errores (`proceso` + `guardado`).
+*   **Códigos:** 3 = todos los fragmentos fallaron; 4 = esquema sin índice (no se llamó al modelo); 5 = algún fragmento no se guardó (el resto sí). Un fallo de guardado parcial ya no sale con 0.
+
+## [2026-11-27] - `--input`: una ruta inexistente es un error
+*   **Decisión:** si el valor empieza con `/`, `./`, `~/`, `../` o termina en `.txt/.md/.json/.html` (sin saltos de línea) y no existe → `FileNotFoundError` (salida 1), nunca texto. Carpeta → `IsADirectoryError`. `~` se expande. Un archivo existente sin pinta de ruta se sigue leyendo (compatibilidad). El resto es texto literal.
+
+## [2026-11-27] - `diagnostico_db.py` y política de backup
+*   **Decisión:** herramienta de solo lectura (`mode=ro` + `query_only`) en Python estándar, para no depender del CLI de sqlite en Termux. Subcomandos: `base`, `version`, `hechos`, `exportar`, `auditar`, `backup`.
+*   **Backup:** `VACUUM INTO` a un archivo nuevo (se niega a sobrescribir), con verificación (`integrity_check`, conteos por tabla, `user_version`) y permisos 600. `cp diamante.db` **no sirve** con WAL: se probó que el archivo principal puede pesar 4 KB mientras los datos viven en el `-wal`. El backup debe copiarse además fuera del teléfono.
+*   **Exportar:** `exportar ID RUTA` entrega el `texto_limpio` exacto de la versión para usarlo como `--input`.
+
+## [2026-11-27] - Métricas antes de tocar `MAX_TOKENS_LLM`, `MAX_HECHOS_POR_FRAGMENTO` o la longitud de cita
+*   **Decisión:** no se cambia ninguno. El extractor imprime al final de cada corrida los datos para decidir (tokens generados vs tope, salidas recuperadas, hechos por fragmento y veredicto por posición, percentiles del largo de cita, motivos de rechazo, tiempos). Criterios propuestos en `PROCEDIMIENTO_PRIMERA_ESCRITURA.md`. Tres noticias permiten detectar un problema, no descartarlo.
+
+## [2026-11-27] - Corrección de fixture de test (no de lógica)
+*   `ESQUEMA_PRUEBA` de `test_extractor_json.py` era una copia mínima sin el índice y, al exigir `--guardar` el esquema v4, 4 tests pasaron a código 4. Se añadieron 4 líneas: el fixture toma `db_setup.SQL_INDICE_HECHOS` (una sola definición). Ningún test cambió de lógica ni de aserciones; los contratos del Guardian no se tocaron.
+
+## [2026-11-27] - Pendiente de decisión: vínculo texto ↔ `version_id`
+*   El extractor no comprueba que `--input` sea el texto de `--version-id` (por contrato de aislamiento no puede leer la base). Un cruce guarda hechos en la versión equivocada; `diagnostico_db.py auditar` lo detecta a posteriori. Opciones: (1) mantener el procedimiento manual; (2) leer el texto desde la base en un módulo aparte, o relajar `TestAislamiento` de forma explícita. No se implementa sin Go.

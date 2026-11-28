@@ -7,7 +7,7 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 *   **Hardware:** Realme 8 Pro (Snapdragon 720G, 8GB RAM, sin root).
 *   **Entorno:** Termux (instalado oficialmente desde **F-Droid**, no GitHub, para asegurar firmas y actualizaciones). Uso de `termux-api` y `termux-job-scheduler`.
 *   **Lenguaje:** Python 3.14.10.
-*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`). Archivo: `diamante.db`. Esquema v2: `documentos`, `versiones`, `crudos`, `hechos`, `tareas`, `ejecuciones`.
+*   **Base de Datos:** SQLite (modo WAL, `synchronous=NORMAL`). Archivo: `diamante.db`. Esquema v4: `documentos`, `versiones`, `crudos`, `hechos`, `tareas`, `ejecuciones` (v3 añadió columnas de revisión a `documentos`; v4 añade el índice único `ux_hechos_identidad` sobre `hechos`).
 *   **Librerías Locales:** `trafilatura` (limpieza HTML). `rapidfuzz` (se usará en un módulo posterior para similitud). `regex`/diccionarios (NER, en lugar de spaCy).
 *   **Programación de Tareas:** `termux-job-scheduler`. **Nota crítica:** Android impone un mínimo de 15 minutos (900,000 ms) para tareas periódicas en segundo plano.
 *   **LLM Local:** Qwen 1.5B Q4 (GGUF) vía `llama.cpp` (Uso exclusivo: extracción estructurada a JSON).
@@ -19,7 +19,7 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 3.  **Extracción Determinista:** Python puro (`regex`) extrae fechas, números de decretos e instituciones bolivianas (Aduana, BCB, INE) usando un diccionario propio (gazetteer).
 4. **Extracción Semántica:** Qwen 1.5B recibe fragmentos cortos (cortados por oraciones, no por caracteres) y devuelve JSON estricto con hechos (`sujeto`, `accion`, `objeto`, `cita_literal`).
 5. **Validación (El Guardián):** Python verifica que la cita literal exista en el texto original y que las cifras coincidan. Los hechos rechazados se guardan con `estado='rechazado'` y su motivo.
-6.  **Almacenamiento:** Todo va a SQLite. Máquina de estados para las tareas (`pendiente`, `running`, `completed`, `failed`, `dead`).
+6.  **Almacenamiento:** Todo va a SQLite. Máquina de estados para las tareas (`pendiente`, `running`, `completed`, `failed`, `dead`). Los hechos se guardan en una transacción por fragmento y son **idempotentes**: la identidad de un hecho es `(version_id, tipo, estado, sujeto, accion, objeto, cita_literal)` (NULL y vacío equivalen) y un repetido se omite y se cuenta, no se duplica. Solo un conflicto de unicidad se silencia; cualquier otro error revierte el fragmento y se informa. `--guardar` se niega a correr sin el índice (esquema v4).
 7.  **Generación de Informe:** Un script empaqueta los hechos JSON validados y los envía a la nube. El prompt exige que cada párrafo cite un ID de hecho (`[F123]`).
 8.  **Distribución:** El informe final (Markdown) se envía por Telegram como archivo `.md`.
 

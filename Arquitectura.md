@@ -26,4 +26,4 @@ El proyecto es **Data-Centric**, no AI-Centric. La inteligencia del sistema resi
 ## 4. Reglas de Seguridad Críticas
 *   **Aislamiento del LLM:** Qwen no tiene acceso a internet, ni a la base de datos, ni a claves API. Solo recibe texto y devuelve JSON.
 *   **Anti-Prompt Injection:** Las noticias se tratan como "datos no confiables". Nunca se ejecutan instrucciones que vengan dentro del texto de una noticia.
-*   **Validación Estricta:** El JSON del LLM se valida con Pydantic. Python inyecta los metadatos (URL, fuente, fecha de captura), el LLM no puede inventarlos.
+*   **Validación Estricta:** El JSON del LLM se valida con reglas deterministas propias en Python (`extractor_json.py`, El Guardián). Python inyecta los metadatos (URL, fuente, fecha de captura), el LLM no puede inventarlos.
